@@ -1,1 +1,344 @@
-"""\nQdrant Database Handler\nManages connections and operations with Qdrant vector database\n"""\n\nfrom typing import List, Dict, Any, Optional\nfrom pathlib import Path\nimport uuid\n\nfrom qdrant_client import QdrantClient\nfrom qdrant_client.models import (\n    Distance, VectorParams, PointStruct,\n    Filter, FieldCondition, MatchValue\n)\nfrom sentence_transformers import SentenceTransformer\n\nfrom config import Config\nfrom npc_extractor import NPCData\n\n\nclass QdrantHandler:\n    """Handles all Qdrant database operations"""\n    \n    def __init__(self, config: Config):\n        """\n        Initialize Qdrant handler\n        \n        Args:\n            config: Application configuration\n        """\n        self.config = config\n        \n        # Connect to local Qdrant instance\n        self.client = QdrantClient(\n            host=config.qdrant_host,\n            port=config.qdrant_port,\n            prefer_grpc=False  # Use REST API for local connections\n        )\n        \n        # Initialize embedding model\n        print(f"Loading embedding model: {config.embedding_model}")\n        self.embedding_model = SentenceTransformer(config.embedding_model)\n        \n        # Verify vector dimension matches\n        test_embedding = self.embedding_model.encode("test")\n        actual_dim = len(test_embedding)\n        if actual_dim != config.vector_dimension:\n            print(f"Warning: Vector dimension mismatch. Config: {config.vector_dimension}, Actual: {actual_dim}")\n            config.vector_dimension = actual_dim\n        \n        # Initialize collections\n        self._ensure_collections()\n    \n    def _ensure_collections(self):\n        """Ensure required collections exist"""\n        collections = self.client.get_collections().collections\n        collection_names = [c.name for c in collections]\n        \n        # Define all collections to create\n        required_collections = [\n            (self.config.qdrant_collection_npcs, "NPCs"),\n            (self.config.qdrant_collection_rulebooks, "rulebooks"),\n            (self.config.qdrant_collection_adventurepaths, "adventure paths"),\n        ]\n        \n        # Create each collection if it doesn't exist\n        for collection_name, description in required_collections:\n            if collection_name not in collection_names:\n                print(f"Creating collection: {collection_name} ({description})")\n                self.client.create_collection(\n                    collection_name=collection_name,\n                    vectors_config=VectorParams(\n                        size=self.config.vector_dimension,\n                        distance=Distance.COSINE\n                    )\n                )\n    \n    def determine_collection(self, file_path: Path, metadata: Dict[str, Any]) -> str:\n        """\n        Determine which collection content should go to based on filename\n        \n        Args:\n            file_path: Path to the file\n            metadata: File metadata\n            \n        Returns:\n            Collection name to use\n        """\n        filename_lower = file_path.name.lower()\n        \n        # Check for adventure path indicator in filename\n        # This includes:\n        # - "adventure path" or "adventurepath" (explicit)\n        # - Any file with "adventure" in the title (all adventure paths have this word)\n        if ('adventure path' in filename_lower or \n            'adventurepath' in filename_lower or\n            'adventure' in filename_lower):\n            return self.config.qdrant_collection_adventurepaths\n        \n        # Everything else defaults to rulebooks\n        # Common rulebook patterns: "rulebook", "core rules", "rules", "handbook", "guide"\n        # But even if filename doesn't match these patterns, we still route to rulebooks\n        return self.config.qdrant_collection_rulebooks\n    \n    def is_adventure_path(self, file_path: Path) -> bool:\n        """\n        Check if a file is an adventure path based on filename\n        \n        Args:\n            file_path: Path to the file\n            \n        Returns:\n            True if file is an adventure path\n        """\n        filename_lower = file_path.name.lower()\n        return ('adventure path' in filename_lower or \n                'adventurepath' in filename_lower or\n                'adventure' in filename_lower)\n    \n    def embed_text(self, text: str) -> List[float]:\n        """\n        Generate embedding vector for text\n        \n        Args:\n            text: Text to embed\n            \n        Returns:\n            Embedding vector as list of floats\n        """\n        embedding = self.embedding_model.encode(text)\n        return embedding.tolist()\n    \n    def embed_batch(self, texts: List[str]) -> List[List[float]]:\n        """\n        Generate embeddings for batch of texts\n        \n        Args:\n            texts: List of texts to embed\n            \n        Returns:\n            List of embedding vectors\n        """\n        embeddings = self.embedding_model.encode(texts, show_progress_bar=True)\n        return [emb.tolist() for emb in embeddings]\n    \n    def insert_chunks(\n        self,\n        chunks: List[str],\n        metadata: Dict[str, Any],\n        file_path: Path\n    ) -> tuple[int, str]:\n        """\n        Insert text chunks into appropriate collection based on content type\n        \n        Args:\n            chunks: List of text chunks\n            metadata: File metadata\n            file_path: Source file path\n            \n        Returns:\n            Tuple of (number of chunks inserted, collection name used)\n        """\n        if not chunks:\n            return 0, self.config.qdrant_collection_rulebooks\n        \n        # Determine which collection to use\n        collection_name = self.determine_collection(file_path, metadata)\n        \n        # Generate embeddings\n        embeddings = self.embed_batch(chunks)\n        \n        # Create points\n        points = []\n        for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):\n            point_id = str(uuid.uuid4())\n            \n            payload = {\n                'text': chunk,\n                'chunk_index': i,\n                'total_chunks': len(chunks),\n                'source_file': metadata['filename'],\n                'file_path': str(file_path),\n                'content_type': self._get_content_type_from_collection(collection_name),\n                **metadata\n            }\n            \n            points.append(PointStruct(\n                id=point_id,\n                vector=embedding,\n                payload=payload\n            ))\n        \n        # Insert into Qdrant\n        self.client.upsert(\n            collection_name=collection_name,\n            points=points\n        )\n        \n        return len(points), collection_name\n    \n    def _get_content_type_from_collection(self, collection_name: str) -> str:\n        """Get content type label from collection name"""\n        if collection_name == self.config.qdrant_collection_rulebooks:\n            return "rulebook"\n        elif collection_name == self.config.qdrant_collection_adventurepaths:\n            return "adventure_path"\n        elif collection_name == self.config.qdrant_collection_npcs:\n            return "npc"\n        else:\n            return "rulebook"  # Default to rulebook\n    \n    def insert_npc(self, npc: NPCData) -> str:\n        """\n        Insert NPC into dedicated NPC collection\n        \n        Args:\n            npc: NPCData to insert\n            \n        Returns:\n            Point ID\n        """\n        # Create embedding from NPC description or name\n        embed_text = npc.description if npc.description else npc.name\n        if npc.raw_text:\n            embed_text = npc.raw_text\n        \n        embedding = self.embed_text(embed_text)\n        \n        # Create point\n        point_id = str(uuid.uuid4())\n        payload = npc.to_dict()\n        \n        point = PointStruct(\n            id=point_id,\n            vector=embedding,\n            payload=payload\n        )\n        \n        # Insert into Qdrant\n        self.client.upsert(\n            collection_name=self.config.qdrant_collection_npcs,\n            points=[point]\n        )\n        \n        return point_id\n    \n    def insert_npcs(self, npcs: List[NPCData]) -> int:\n        """\n        Insert multiple NPCs\n        \n        Args:\n            npcs: List of NPCData\n            \n        Returns:\n            Number of NPCs inserted\n        """\n        for npc in npcs:\n            self.insert_npc(npc)\n        return len(npcs)\n    \n    def check_file_exists(self, file_path: Path) -> bool:\n        """\n        Check if file has already been processed\n        \n        Args:\n            file_path: Path to file\n            \n        Returns:\n            True if file exists in database\n        """\n        # Check in all collections since we don't know where it was stored\n        for collection_name in [\n            self.config.qdrant_collection_rulebooks,\n            self.config.qdrant_collection_adventurepaths\n        ]:\n            try:\n                result = self.client.scroll(\n                    collection_name=collection_name,\n                    scroll_filter=Filter(\n                        must=[\n                            FieldCondition(\n                                key="file_path",\n                                match=MatchValue(value=str(file_path))\n                            )\n                        ]\n                    ),\n                    limit=1\n                )\n                if len(result[0]) > 0:\n                    return True\n            except Exception:\n                continue\n        return False\n    \n    def get_collection_stats(self, collection_name: str) -> Dict[str, Any]:\n        """\n        Get statistics for a collection\n        \n        Args:\n            collection_name: Name of collection\n            \n        Returns:\n            Dictionary of statistics\n        """\n        try:\n            info = self.client.get_collection(collection_name=collection_name)\n            return {\n                'name': collection_name,\n                'points_count': info.points_count,\n                'vectors_count': info.vectors_count,\n                'status': info.status.value if info.status else 'unknown'\n            }\n        except Exception as e:\n            return {\n                'name': collection_name,\n                'error': str(e)\n            }\n    \n    def delete_by_file(self, file_path: Path, collection_name: Optional[str] = None):\n        """\n        Delete all points associated with a file\n        \n        Args:\n            file_path: Path to file\n            collection_name: Collection to delete from (default: check all collections)\n        """\n        collections_to_check = []\n        if collection_name:\n            collections_to_check = [collection_name]\n        else:\n            # Check all non-NPC collections\n            collections_to_check = [\n                self.config.qdrant_collection_rulebooks,\n                self.config.qdrant_collection_adventurepaths\n            ]\n        \n        for coll in collections_to_check:\n            try:\n                # Qdrant doesn't support delete by filter directly, so we need to:\n                # 1. Query for points with this file_path\n                # 2. Delete by IDs\n                result = self.client.scroll(\n                    collection_name=coll,\n                    scroll_filter=Filter(\n                        must=[\n                            FieldCondition(\n                                key="file_path",\n                                match=MatchValue(value=str(file_path))\n                            )\n                        ]\n                    ),\n                    limit=10000  # Adjust based on expected file size\n                )\n                \n                point_ids = [point.id for point in result[0]]\n                \n                if point_ids:\n                    self.client.delete(\n                        collection_name=coll,\n                        points_selector=point_ids\n                    )\n            except Exception:\n                continue\n
+"""
+Qdrant Database Handler - FIXED VERSION
+Manages vector database operations with corrected adventure path routing
+
+CHANGES:
+- Added is_adventure_path() method that checks for "adventure" anywhere in filename  
+- Fixed determine_collection() to properly route adventure paths
+- Fixed syntax errors from corrupted line breaks
+- Now catches: "adventure", "adventure path", "adventurepath", etc.
+"""
+
+from typing import List, Dict, Any, Optional
+from pathlib import Path
+import uuid
+
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance, VectorParams, PointStruct,
+    Filter, FieldCondition, MatchValue
+)
+from sentence_transformers import SentenceTransformer
+
+from config import Config
+from npc_extractor import NPCData
+
+
+class QdrantHandler:
+    """Handles all Qdrant database operations"""
+    
+    def __init__(self, config: Config):
+        """
+        Initialize Qdrant handler
+        
+        Args:
+            config: Application configuration
+        """
+        self.config = config
+        
+        # Connect to local Qdrant instance
+        self.client = QdrantClient(
+            host=config.qdrant_host,
+            port=config.qdrant_port,
+            prefer_grpc=False
+        )
+        
+        # Initialize embedding model
+        print(f"Loading embedding model: {config.embedding_model}")
+        self.embedding_model = SentenceTransformer(config.embedding_model)
+        
+        # Verify vector dimension matches
+        test_embedding = self.embedding_model.encode("test")
+        actual_dim = len(test_embedding)
+        if actual_dim != config.vector_dimension:
+            print(f"Warning: Vector dimension mismatch. Config: {config.vector_dimension}, Actual: {actual_dim}")
+            config.vector_dimension = actual_dim
+        
+        # Initialize collections
+        self._ensure_collections()
+    
+    def _ensure_collections(self):
+        """Ensure required collections exist"""
+        collections = self.client.get_collections().collections
+        collection_names = [c.name for c in collections]
+        
+        required_collections = [
+            (self.config.qdrant_collection_npcs, "NPCs"),
+            (self.config.qdrant_collection_rulebooks, "rulebooks"),
+            (self.config.qdrant_collection_adventurepaths, "adventure paths"),
+        ]
+        
+        for collection_name, description in required_collections:
+            if collection_name not in collection_names:
+                print(f"Creating collection: {collection_name} ({description})")
+                self.client.create_collection(
+                    collection_name=collection_name,
+                    vectors_config=VectorParams(
+                        size=self.config.vector_dimension,
+                        distance=Distance.COSINE
+                    )
+                )
+    
+    def is_adventure_path(self, file_path: Path) -> bool:
+        """
+        Check if a file is an adventure path based on filename
+        
+        FIXED: Now checks for "adventure" anywhere in filename
+        
+        Args:
+            file_path: Path to the file
+            
+        Returns:
+            True if file is an adventure path
+        """
+        filename_lower = file_path.name.lower()
+        return 'adventure' in filename_lower
+    
+    def determine_collection(self, file_path: Path, metadata: Dict[str, Any]) -> str:
+        """
+        Determine which collection content should go to based on filename
+        
+        FIXED: Now properly detects adventure paths
+        
+        Args:
+            file_path: Path to the file
+            metadata: File metadata
+            
+        Returns:
+            Collection name to use
+        """
+        if self.is_adventure_path(file_path):
+            return self.config.qdrant_collection_adventurepaths
+        return self.config.qdrant_collection_rulebooks
+    
+    def embed_text(self, text: str) -> List[float]:
+        """
+        Generate embedding vector for text
+        
+        Args:
+            text: Text to embed
+            
+        Returns:
+            Embedding vector as list of floats
+        """
+        embedding = self.embedding_model.encode(text)
+        return embedding.tolist()
+    
+    def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        """
+        Generate embeddings for batch of texts
+        
+        Args:
+            texts: List of texts to embed
+            
+        Returns:
+            List of embedding vectors
+        """
+        embeddings = self.embedding_model.encode(texts, show_progress_bar=True)
+        return [emb.tolist() for emb in embeddings]
+    
+    def insert_chunks(
+        self,
+        chunks: List[str],
+        metadata: Dict[str, Any],
+        file_path: Path
+    ) -> tuple[int, str]:
+        """
+        Insert text chunks into appropriate collection based on content type
+        
+        Args:
+            chunks: List of text chunks
+            metadata: File metadata
+            file_path: Source file path
+            
+        Returns:
+            Tuple of (number of chunks inserted, collection name used)
+        """
+        if not chunks:
+            return 0, self.config.qdrant_collection_rulebooks
+        
+        collection_name = self.determine_collection(file_path, metadata)
+        embeddings = self.embed_batch(chunks)
+        
+        points = []
+        for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+            point_id = str(uuid.uuid4())
+            
+            payload = {
+                'text': chunk,
+                'chunk_index': i,
+                'total_chunks': len(chunks),
+                'source_file': metadata['filename'],
+                'file_path': str(file_path),
+                'content_type': self._get_content_type_from_collection(collection_name),
+                **metadata
+            }
+            
+            points.append(PointStruct(
+                id=point_id,
+                vector=embedding,
+                payload=payload
+            ))
+        
+        self.client.upsert(
+            collection_name=collection_name,
+            points=points
+        )
+        
+        return len(points), collection_name
+    
+    def _get_content_type_from_collection(self, collection_name: str) -> str:
+        """Get content type label from collection name"""
+        if collection_name == self.config.qdrant_collection_rulebooks:
+            return "rulebook"
+        elif collection_name == self.config.qdrant_collection_adventurepaths:
+            return "adventure_path"
+        elif collection_name == self.config.qdrant_collection_npcs:
+            return "npc"
+        else:
+            return "rulebook"
+    
+    def insert_npc(self, npc: NPCData) -> str:
+        """
+        Insert NPC into dedicated NPC collection
+        
+        Args:
+            npc: NPCData to insert
+            
+        Returns:
+            Point ID
+        """
+        embed_text = npc.description if npc.description else npc.name
+        if npc.raw_text:
+            embed_text = npc.raw_text
+        
+        embedding = self.embed_text(embed_text)
+        
+        point_id = str(uuid.uuid4())
+        payload = npc.to_dict()
+        
+        point = PointStruct(
+            id=point_id,
+            vector=embedding,
+            payload=payload
+        )
+        
+        self.client.upsert(
+            collection_name=self.config.qdrant_collection_npcs,
+            points=[point]
+        )
+        
+        return point_id
+    
+    def insert_npcs(self, npcs: List[NPCData]) -> int:
+        """
+        Insert multiple NPCs
+        
+        Args:
+            npcs: List of NPCData
+            
+        Returns:
+            Number of NPCs inserted
+        """
+        for npc in npcs:
+            self.insert_npc(npc)
+        return len(npcs)
+    
+    def check_file_exists(self, file_path: Path) -> bool:
+        """
+        Check if file has already been processed
+        
+        Args:
+            file_path: Path to file
+            
+        Returns:
+            True if file exists in database
+        """
+        for collection_name in [
+            self.config.qdrant_collection_rulebooks,
+            self.config.qdrant_collection_adventurepaths
+        ]:
+            try:
+                result = self.client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="file_path",
+                                match=MatchValue(value=str(file_path))
+                            )
+                        ]
+                    ),
+                    limit=1
+                )
+                if len(result[0]) > 0:
+                    return True
+            except Exception:
+                continue
+        return False
+    
+    def get_collection_stats(self, collection_name: str) -> Dict[str, Any]:
+        """
+        Get statistics for a collection
+        
+        Args:
+            collection_name: Name of collection
+            
+        Returns:
+            Dictionary of statistics
+        """
+        try:
+            info = self.client.get_collection(collection_name=collection_name)
+            return {
+                'name': collection_name,
+                'points_count': info.points_count,
+                'vectors_count': info.vectors_count,
+                'status': info.status.value if info.status else 'unknown'
+            }
+        except Exception as e:
+            return {
+                'name': collection_name,
+                'error': str(e)
+            }
+    
+    def delete_by_file(self, file_path: Path, collection_name: Optional[str] = None):
+        """
+        Delete all points associated with a file
+        
+        Args:
+            file_path: Path to file
+            collection_name: Collection to delete from (default: check all collections)
+        """
+        collections_to_check = []
+        if collection_name:
+            collections_to_check = [collection_name]
+        else:
+            collections_to_check = [
+                self.config.qdrant_collection_rulebooks,
+                self.config.qdrant_collection_adventurepaths
+            ]
+        
+        for coll in collections_to_check:
+            try:
+                result = self.client.scroll(
+                    collection_name=coll,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="file_path",
+                                match=MatchValue(value=str(file_path))
+                            )
+                        ]
+                    ),
+                    limit=10000
+                )
+                
+                point_ids = [point.id for point in result[0]]
+                
+                if point_ids:
+                    self.client.delete(
+                        collection_name=coll,
+                        points_selector=point_ids
+                    )
+            except Exception:
+                continue
