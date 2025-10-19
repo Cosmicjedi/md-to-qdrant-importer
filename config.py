@@ -20,9 +20,9 @@ class Config:
             env_file: Path to .env file (optional, defaults to .env in current directory)
         """
         if env_file:
-            load_dotenv(env_file)
+            load_dotenv(env_file, override=True)
         else:
-            load_dotenv()
+            load_dotenv(override=True)
         
         # Azure AI Configuration
         self.azure_endpoint = os.getenv('AZURE_ENDPOINT', '')
@@ -106,17 +106,18 @@ class Config:
 config: Optional[Config] = None
 
 
-def get_config(env_file: Optional[str] = None) -> Config:
+def get_config(env_file: Optional[str] = None, force_reload: bool = False) -> Config:
     """
     Get or create global configuration instance
     
     Args:
         env_file: Path to .env file (optional)
+        force_reload: If True, force reload config even if one exists
     
     Returns:
         Config instance
     """
     global config
-    if config is None:
+    if config is None or force_reload:
         config = Config(env_file)
     return config
