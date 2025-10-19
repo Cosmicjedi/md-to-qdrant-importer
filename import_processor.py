@@ -1,1 +1,221 @@
-"""\nMain Import Processor\nCoordinates the entire import pipeline\n"""\n\nimport json\nfrom pathlib import Path\nfrom typing import List, Dict, Any, Optional, Callable\nfrom dataclasses import dataclass, asdict\nfrom datetime import datetime\n\nfrom config import Config\nfrom text_processor import TextChunker, MarkdownProcessor\nfrom npc_extractor import NPCExtractor, NPCData\nfrom qdrant_handler import QdrantHandler\n\n\n@dataclass\nclass ImportResult:\n    """Result of importing a single file"""\n    file_path: str\n    success: bool\n    chunks_imported: int = 0\n    npcs_extracted: int = 0\n    collection_used: str = ""\n    error: Optional[str] = None\n    processing_time: float = 0.0\n    skipped_npc_extraction: bool = False\n    \n    def to_dict(self) -> Dict[str, Any]:\n        return asdict(self)\n\n\nclass ImportProcessor:\n    """Main processor for importing MD files to Qdrant"""\n    \n    def __init__(self, config: Config, progress_callback: Optional[Callable] = None):\n        """\n        Initialize import processor\n        \n        Args:\n            config: Application configuration\n            progress_callback: Optional callback for progress updates\n        """\n        self.config = config\n        self.progress_callback = progress_callback\n        \n        # Initialize components\n        self.chunker = TextChunker(\n            chunk_size=config.chunk_size,\n            overlap=config.chunk_overlap\n        )\n        self.processor = MarkdownProcessor(self.chunker)\n        self.qdrant = QdrantHandler(config)\n        \n        if config.enable_npc_extraction:\n            self.npc_extractor = NPCExtractor(config)\n        else:\n            self.npc_extractor = None\n    \n    def _update_progress(self, message: str, current: int = 0, total: int = 0):\n        """Update progress via callback"""\n        if self.progress_callback:\n            self.progress_callback(message, current, total)\n    \n    def process_file(\n        self,\n        file_path: Path,\n        skip_if_exists: bool = False,\n        extract_npcs: bool = True\n    ) -> ImportResult:\n        """\n        Process a single markdown file\n        \n        Args:\n            file_path: Path to markdown file\n            skip_if_exists: Skip if already in database\n            extract_npcs: Whether to extract NPCs\n            \n        Returns:\n            ImportResult\n        """\n        start_time = datetime.now()\n        \n        try:\n            # Check if already exists\n            if skip_if_exists and self.qdrant.check_file_exists(file_path):\n                return ImportResult(\n                    file_path=str(file_path),\n                    success=True,\n                    chunks_imported=0,\n                    npcs_extracted=0,\n                    processing_time=0.0\n                )\n            \n            self._update_progress(f"Processing {file_path.name}...")\n            \n            # Check if this is an adventure path\n            is_adventure_path = self.qdrant.is_adventure_path(file_path)\n            \n            # Process file into chunks\n            chunks, metadata = self.processor.process_file(file_path)\n            \n            if not chunks:\n                return ImportResult(\n                    file_path=str(file_path),\n                    success=False,\n                    error="No content to process"\n                )\n            \n            # Insert chunks into Qdrant\n            self._update_progress(f"Inserting {len(chunks)} chunks...")\n            chunks_inserted, collection_used = self.qdrant.insert_chunks(chunks, metadata, file_path)\n            \n            # IMPORTANT: Skip NPC extraction for adventure paths\n            # Adventure paths should not have NPCs extracted as they contain campaign-specific characters\n            npcs_extracted = 0\n            skipped_npc_extraction = False\n            \n            if is_adventure_path:\n                self._update_progress(f"Skipping NPC extraction for adventure path: {file_path.name}")\n                skipped_npc_extraction = True\n            elif extract_npcs and self.npc_extractor and self.config.enable_npc_extraction:\n                # Only extract NPCs from rulebooks\n                self._update_progress(f"Extracting NPCs from {file_path.name}...")\n                npcs = self.npc_extractor.extract_npcs_from_chunks(chunks, str(file_path))\n                \n                if npcs:\n                    self._update_progress(f"Found {len(npcs)} NPCs, inserting...")\n                    npcs_extracted = self.qdrant.insert_npcs(npcs)\n            \n            processing_time = (datetime.now() - start_time).total_seconds()\n            \n            return ImportResult(\n                file_path=str(file_path),\n                success=True,\n                chunks_imported=chunks_inserted,\n                npcs_extracted=npcs_extracted,\n                collection_used=collection_used,\n                processing_time=processing_time,\n                skipped_npc_extraction=skipped_npc_extraction\n            )\n            \n        except Exception as e:\n            processing_time = (datetime.now() - start_time).total_seconds()\n            return ImportResult(\n                file_path=str(file_path),\n                success=False,\n                error=str(e),\n                processing_time=processing_time\n            )\n    \n    def process_directory(\n        self,\n        directory: Path,\n        recursive: bool = True,\n        skip_existing: bool = False,\n        extract_npcs: bool = True\n    ) -> List[ImportResult]:\n        """\n        Process all markdown files in a directory\n        \n        Args:\n            directory: Directory containing markdown files\n            recursive: Search subdirectories\n            skip_existing: Skip files already in database\n            extract_npcs: Whether to extract NPCs\n            \n        Returns:\n            List of ImportResults\n        """\n        # Find all markdown files\n        if recursive:\n            md_files = self.processor.find_markdown_files(directory)\n        else:\n            md_files = list(directory.glob("*.md")) + list(directory.glob("*.markdown"))\n        \n        if not md_files:\n            self._update_progress("No markdown files found")\n            return []\n        \n        self._update_progress(f"Found {len(md_files)} markdown files")\n        \n        # Process each file\n        results = []\n        for i, file_path in enumerate(md_files, 1):\n            self._update_progress(\n                f"Processing file {i}/{len(md_files)}: {file_path.name}",\n                i,\n                len(md_files)\n            )\n            \n            result = self.process_file(\n                file_path,\n                skip_if_exists=skip_existing,\n                extract_npcs=extract_npcs\n            )\n            results.append(result)\n        \n        return results\n    \n    def get_stats(self) -> Dict[str, Any]:\n        """\n        Get statistics about processed data\n        \n        Returns:\n            Dictionary of statistics\n        """\n        npc_stats = self.qdrant.get_collection_stats(\n            self.config.qdrant_collection_npcs\n        )\n        rulebook_stats = self.qdrant.get_collection_stats(\n            self.config.qdrant_collection_rulebooks\n        )\n        adventurepath_stats = self.qdrant.get_collection_stats(\n            self.config.qdrant_collection_adventurepaths\n        )\n        \n        return {\n            'npcs': npc_stats,\n            'rulebooks': rulebook_stats,\n            'adventure_paths': adventurepath_stats,\n            'timestamp': datetime.now().isoformat()\n        }\n    \n    def save_results(self, results: List[ImportResult], output_path: Path):\n        """\n        Save import results to JSON file\n        \n        Args:\n            results: List of ImportResults\n            output_path: Path to save results\n        """\n        # Count by collection\n        collection_counts = {}\n        for r in results:\n            if r.success and r.collection_used:\n                collection_counts[r.collection_used] = collection_counts.get(r.collection_used, 0) + 1\n        \n        output_data = {\n            'timestamp': datetime.now().isoformat(),\n            'total_files': len(results),\n            'successful': sum(1 for r in results if r.success),\n            'failed': sum(1 for r in results if not r.success),\n            'total_chunks': sum(r.chunks_imported for r in results),\n            'total_npcs': sum(r.npcs_extracted for r in results),\n            'adventure_paths_skipped_npc': sum(1 for r in results if r.skipped_npc_extraction),\n            'collection_distribution': collection_counts,\n            'results': [r.to_dict() for r in results]\n        }\n        \n        with open(output_path, 'w', encoding='utf-8') as f:\n            json.dump(output_data, f, indent=2)\n
+"""
+Main Import Processor - FIXED VERSION
+Coordinates the entire import pipeline
+
+CHANGES:
+- Added skipped_npc_extraction field to ImportResult
+- Modified process_file() to skip NPC extraction for adventure paths
+- Added tracking for when NPC extraction is skipped
+- Updated save_results() to report skipped NPC extractions
+"""
+
+import json
+from pathlib import Path
+from typing import List, Dict, Any, Optional, Callable
+from dataclasses import dataclass, asdict
+from datetime import datetime
+import time
+
+from config import Config
+from text_processor import TextChunker, MarkdownProcessor
+from npc_extractor import NPCExtractor, NPCData
+from qdrant_handler import QdrantHandler
+from embeddings import EmbeddingGenerator
+
+
+@dataclass
+class ImportResult:
+    """Result of importing a single file"""
+    file_path: str
+    success: bool
+    chunks_imported: int = 0
+    npcs_extracted: int = 0
+    collection_used: str = ""
+    error: Optional[str] = None
+    processing_time: float = 0.0
+    skipped_npc_extraction: bool = False
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+class ImportProcessor:
+    """Main import pipeline coordinator"""
+    
+    def __init__(
+        self,
+        config: Config,
+        progress_callback: Optional[Callable[[str], None]] = None
+    ):
+        self.config = config
+        self.progress_callback = progress_callback
+        
+        self.qdrant = QdrantHandler(config)
+        self.chunker = TextChunker(
+            chunk_size=config.chunk_size,
+            overlap=config.chunk_overlap
+        )
+        self.markdown_processor = MarkdownProcessor()
+        self.embedder = EmbeddingGenerator(config)
+        
+        self.npc_extractor = None
+        if config.enable_npc_extraction:
+            self.npc_extractor = NPCExtractor(config)
+    
+    def _update_progress(self, message: str):
+        """Send progress update if callback is provided"""
+        if self.progress_callback:
+            self.progress_callback(message)
+    
+    def process_file(
+        self,
+        file_path: Path,
+        extract_npcs: bool = True
+    ) -> ImportResult:
+        """
+        Process a single markdown file
+        
+        FIXED: Now skips NPC extraction for adventure paths
+        
+        Args:
+            file_path: Path to the markdown file
+            extract_npcs: Whether to extract NPCs (ignored for adventure paths)
+            
+        Returns:
+            ImportResult with processing details
+        """
+        start_time = time.time()
+        
+        try:
+            self._update_progress(f"Processing {file_path.name}...")
+            
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            sections = self.markdown_processor.parse_markdown(content)
+            
+            chunks = self.chunker.create_chunks(
+                text=content,
+                metadata={"file_path": str(file_path)}
+            )
+            
+            if not chunks:
+                return ImportResult(
+                    file_path=str(file_path),
+                    success=False,
+                    error="No chunks created from file"
+                )
+            
+            self._update_progress(f"Generating embeddings for {len(chunks)} chunks...")
+            texts = [chunk["text"] for chunk in chunks]
+            embeddings = self.embedder.generate_embeddings(texts)
+            
+            self._update_progress(f"Inserting chunks into Qdrant...")
+            chunks_inserted = self.qdrant.insert_chunks(chunks, embeddings, file_path)
+            
+            collection = self.qdrant.determine_collection(file_path)
+            
+            is_adventure_path = self.qdrant.is_adventure_path(file_path)
+            
+            npcs_extracted = 0
+            skipped_npc_extraction = False
+            
+            if is_adventure_path:
+                self._update_progress(f"Skipping NPC extraction for adventure path: {file_path.name}")
+                skipped_npc_extraction = True
+            elif extract_npcs and self.npc_extractor and self.config.enable_npc_extraction:
+                self._update_progress(f"Extracting NPCs from {file_path.name}...")
+                npcs = self.npc_extractor.extract_npcs_from_chunks(chunks, str(file_path))
+                
+                if npcs:
+                    self._update_progress(f"Found {len(npcs)} NPCs, inserting...")
+                    npcs_extracted = self.qdrant.insert_npcs(npcs)
+            
+            processing_time = time.time() - start_time
+            
+            return ImportResult(
+                file_path=str(file_path),
+                success=True,
+                chunks_imported=chunks_inserted,
+                npcs_extracted=npcs_extracted,
+                collection_used=collection,
+                processing_time=processing_time,
+                skipped_npc_extraction=skipped_npc_extraction
+            )
+            
+        except Exception as e:
+            processing_time = time.time() - start_time
+            return ImportResult(
+                file_path=str(file_path),
+                success=False,
+                error=str(e),
+                processing_time=processing_time
+            )
+    
+    def process_directory(
+        self,
+        directory: Path,
+        pattern: str = "*.md",
+        extract_npcs: bool = True
+    ) -> List[ImportResult]:
+        """
+        Process all matching files in a directory
+        
+        Args:
+            directory: Directory to process
+            pattern: File pattern to match
+            extract_npcs: Whether to extract NPCs
+            
+        Returns:
+            List of import results
+        """
+        files = list(directory.glob(pattern))
+        
+        if not files:
+            self._update_progress(f"No files matching '{pattern}' found in {directory}")
+            return []
+        
+        self._update_progress(f"Found {len(files)} files to process")
+        
+        results = []
+        for i, file_path in enumerate(files, 1):
+            self._update_progress(f"[{i}/{len(files)}] Processing {file_path.name}")
+            result = self.process_file(file_path, extract_npcs)
+            results.append(result)
+        
+        return results
+    
+    def save_results(
+        self,
+        results: List[ImportResult],
+        output_path: Path
+    ):
+        """
+        Save import results to JSON file
+        
+        FIXED: Now includes count of files that skipped NPC extraction
+        
+        Args:
+            results: List of import results
+            output_path: Path to save results JSON
+        """
+        summary = {
+            'total_files': len(results),
+            'successful': sum(1 for r in results if r.success),
+            'failed': sum(1 for r in results if not r.success),
+            'total_chunks': sum(r.chunks_imported for r in results),
+            'total_npcs': sum(r.npcs_extracted for r in results),
+            'adventure_paths_skipped_npc': sum(1 for r in results if r.skipped_npc_extraction),
+            'total_time': sum(r.processing_time for r in results),
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        output_data = {
+            'summary': summary,
+            'results': [r.to_dict() for r in results]
+        }
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(output_data, f, indent=2)
+        
+        self._update_progress(f"Results saved to {output_path}")
