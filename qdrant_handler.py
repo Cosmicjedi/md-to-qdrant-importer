@@ -7,6 +7,7 @@ CHANGES:
 - Fixed determine_collection() to properly route adventure paths
 - Fixed syntax errors from corrupted line breaks
 - Now catches: "adventure", "adventure path", "adventurepath", etc.
+- FIXED: insert_chunks() signature to match import_processor calling convention
 """
 
 from typing import List, Dict, Any, Optional
@@ -94,15 +95,16 @@ class QdrantHandler:
         filename_lower = file_path.name.lower()
         return 'adventure' in filename_lower
     
-    def determine_collection(self, file_path: Path, metadata: Dict[str, Any]) -> str:
+    def determine_collection(self, file_path: Path, metadata: Optional[Dict[str, Any]] = None) -> str:
         """
         Determine which collection content should go to based on filename
         
         FIXED: Now properly detects adventure paths
+        FIXED: Made metadata optional since it's not always needed
         
         Args:
             file_path: Path to the file
-            metadata: File metadata
+            metadata: File metadata (optional)
             
         Returns:
             Collection name to use
@@ -139,36 +141,44 @@ class QdrantHandler:
     
     def insert_chunks(
         self,
-        chunks: List[str],
-        metadata: Dict[str, Any],
+        chunks: List[Dict[str, Any]],
+        embeddings: List[List[float]],
         file_path: Path
-    ) -> tuple[int, str]:
+    ) -> int:
         """
-        Insert text chunks into appropriate collection based on content type
+        Insert text chunks with pre-computed embeddings into appropriate collection
+        
+        FIXED: Changed signature to match how import_processor calls it
         
         Args:
-            chunks: List of text chunks
-            metadata: File metadata
+            chunks: List of chunk dictionaries with 'text' and 'metadata' keys
+            embeddings: Pre-computed embedding vectors for each chunk
             file_path: Source file path
             
         Returns:
-            Tuple of (number of chunks inserted, collection name used)
+            Number of chunks inserted
         """
-        if not chunks:
-            return 0, self.config.qdrant_collection_rulebooks
+        if not chunks or not embeddings:
+            return 0
         
-        collection_name = self.determine_collection(file_path, metadata)
-        embeddings = self.embed_batch(chunks)
+        if len(chunks) != len(embeddings):
+            raise ValueError(f"Mismatch: {len(chunks)} chunks but {len(embeddings)} embeddings")
+        
+        # Determine which collection to use
+        collection_name = self.determine_collection(file_path)
         
         points = []
         for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
             point_id = str(uuid.uuid4())
             
+            # Extract metadata from chunk
+            metadata = chunk.get('metadata', {})
+            
             payload = {
-                'text': chunk,
+                'text': chunk['text'],
                 'chunk_index': i,
                 'total_chunks': len(chunks),
-                'source_file': metadata['filename'],
+                'source_file': file_path.name,
                 'file_path': str(file_path),
                 'content_type': self._get_content_type_from_collection(collection_name),
                 **metadata
@@ -180,12 +190,13 @@ class QdrantHandler:
                 payload=payload
             ))
         
+        # Insert all points
         self.client.upsert(
             collection_name=collection_name,
             points=points
         )
         
-        return len(points), collection_name
+        return len(points)
     
     def _get_content_type_from_collection(self, collection_name: str) -> str:
         """Get content type label from collection name"""
