@@ -19,10 +19,13 @@ class Config:
         Args:
             env_file: Path to .env file (optional, defaults to .env in current directory)
         """
+        # FIXED: Changed override=True to override=False so that environment variables
+        # set programmatically (e.g., in the GUI) take precedence over .env file values.
+        # This prevents the .env file from overriding the prefix when updated via GUI.
         if env_file:
-            load_dotenv(env_file, override=True)
+            load_dotenv(env_file, override=False)
         else:
-            load_dotenv(override=True)
+            load_dotenv(override=False)
         
         # Azure AI Configuration
         self.azure_endpoint = os.getenv('AZURE_ENDPOINT', '')
