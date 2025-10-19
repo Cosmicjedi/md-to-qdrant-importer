@@ -389,21 +389,28 @@ class ImporterGUI:
                 self._log(f"  {coll}: {count} files")
             self._log("=" * 60)
             
-            self.root.after(0, lambda: messagebox.showinfo(
-                "Import Complete",
+            # FIXED: Capture the success message in the closure
+            success_message = (
                 f"Import finished!\n\n"
                 f"Files processed: {len(results)}\n"
                 f"Successful: {successful}\n"
                 f"Failed: {failed}\n"
                 f"Chunks imported: {total_chunks}\n"
                 f"NPCs extracted: {total_npcs}"
+            )
+            
+            self.root.after(0, lambda msg=success_message: messagebox.showinfo(
+                "Import Complete",
+                msg
             ))
             
-        except Exception as e:
-            self._log(f"ERROR: {e}")
-            self.root.after(0, lambda: messagebox.showerror(
+        except Exception as error:
+            # FIXED: Capture the error message in a variable before the lambda
+            error_message = f"An error occurred during import:\n{error}"
+            self._log(f"ERROR: {error}")
+            self.root.after(0, lambda msg=error_message: messagebox.showerror(
                 "Import Error",
-                f"An error occurred during import:\n{e}"
+                msg
             ))
         
         finally:
