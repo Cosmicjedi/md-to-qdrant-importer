@@ -1,0 +1,26 @@
+# Core Dependencies
+qdrant-client>=1.7.0
+sentence-transformers>=2.2.2
+openai>=1.0.0
+python-dotenv>=1.0.0
+
+# Text Processing
+markdown>=3.4.4
+beautifulsoup4>=4.12.2
+
+# GUI (optional, for gui.py)
+customtkinter>=5.2.0
+Pillow>=10.0.0
+
+# Utilities
+tqdm>=4.66.0
+colorama>=0.4.6
+pyyaml>=6.0.1
+
+# Data Processing
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Azure AI Support
+azure-ai-textanalytics>=5.3.0
+azure-core>=1.29.0
