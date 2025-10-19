@@ -194,9 +194,6 @@ class ImportProcessor:
         Returns:
             Dictionary of statistics
         """
-        general_stats = self.qdrant.get_collection_stats(
-            self.config.qdrant_collection_general
-        )
         npc_stats = self.qdrant.get_collection_stats(
             self.config.qdrant_collection_npcs
         )
@@ -208,7 +205,6 @@ class ImportProcessor:
         )
         
         return {
-            'general_content': general_stats,
             'npcs': npc_stats,
             'rulebooks': rulebook_stats,
             'adventure_paths': adventurepath_stats,

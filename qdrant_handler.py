@@ -58,7 +58,6 @@ class QdrantHandler:
         
         # Define all collections to create
         required_collections = [
-            (self.config.qdrant_collection_general, "general content"),
             (self.config.qdrant_collection_npcs, "NPCs"),
             (self.config.qdrant_collection_rulebooks, "rulebooks"),
             (self.config.qdrant_collection_adventurepaths, "adventure paths"),
@@ -93,14 +92,10 @@ class QdrantHandler:
         if 'adventure path' in filename_lower or 'adventurepath' in filename_lower:
             return self.config.qdrant_collection_adventurepaths
         
-        # Check for rulebook indicators
+        # Everything else defaults to rulebooks
         # Common rulebook patterns: "rulebook", "core rules", "rules", "handbook", "guide"
-        rulebook_patterns = ['rulebook', 'core rules', 'rules', 'handbook', 'guide', 'manual', 'compendium']
-        if any(pattern in filename_lower for pattern in rulebook_patterns):
-            return self.config.qdrant_collection_rulebooks
-        
-        # Default to general collection
-        return self.config.qdrant_collection_general
+        # But even if filename doesn't match these patterns, we still route to rulebooks
+        return self.config.qdrant_collection_rulebooks
     
     def embed_text(self, text: str) -> List[float]:
         """
@@ -146,7 +141,7 @@ class QdrantHandler:
             Tuple of (number of chunks inserted, collection name used)
         """
         if not chunks:
-            return 0, self.config.qdrant_collection_general
+            return 0, self.config.qdrant_collection_rulebooks
         
         # Determine which collection to use
         collection_name = self.determine_collection(file_path, metadata)
@@ -192,7 +187,7 @@ class QdrantHandler:
         elif collection_name == self.config.qdrant_collection_npcs:
             return "npc"
         else:
-            return "general"
+            return "rulebook"  # Default to rulebook
     
     def insert_npc(self, npc: NPCData) -> str:
         """
@@ -253,22 +248,29 @@ class QdrantHandler:
         Returns:
             True if file exists in database
         """
-        try:
-            result = self.client.scroll(
-                collection_name=self.config.qdrant_collection_general,
-                scroll_filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key="file_path",
-                            match=MatchValue(value=str(file_path))
-                        )
-                    ]
-                ),
-                limit=1
-            )
-            return len(result[0]) > 0
-        except Exception:
-            return False
+        # Check in all collections since we don't know where it was stored
+        for collection_name in [
+            self.config.qdrant_collection_rulebooks,
+            self.config.qdrant_collection_adventurepaths
+        ]:
+            try:
+                result = self.client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="file_path",
+                                match=MatchValue(value=str(file_path))
+                            )
+                        ]
+                    ),
+                    limit=1
+                )
+                if len(result[0]) > 0:
+                    return True
+            except Exception:
+                continue
+        return False
     
     def get_collection_stats(self, collection_name: str) -> Dict[str, Any]:
         """
@@ -300,31 +302,42 @@ class QdrantHandler:
         
         Args:
             file_path: Path to file
-            collection_name: Collection to delete from (default: general)
+            collection_name: Collection to delete from (default: check all collections)
         """
-        if collection_name is None:
-            collection_name = self.config.qdrant_collection_general
+        collections_to_check = []
+        if collection_name:
+            collections_to_check = [collection_name]
+        else:
+            # Check all non-NPC collections
+            collections_to_check = [
+                self.config.qdrant_collection_rulebooks,
+                self.config.qdrant_collection_adventurepaths
+            ]
         
-        # Qdrant doesn't support delete by filter directly, so we need to:
-        # 1. Query for points with this file_path
-        # 2. Delete by IDs
-        result = self.client.scroll(
-            collection_name=collection_name,
-            scroll_filter=Filter(
-                must=[
-                    FieldCondition(
-                        key="file_path",
-                        match=MatchValue(value=str(file_path))
+        for coll in collections_to_check:
+            try:
+                # Qdrant doesn't support delete by filter directly, so we need to:
+                # 1. Query for points with this file_path
+                # 2. Delete by IDs
+                result = self.client.scroll(
+                    collection_name=coll,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="file_path",
+                                match=MatchValue(value=str(file_path))
+                            )
+                        ]
+                    ),
+                    limit=10000  # Adjust based on expected file size
+                )
+                
+                point_ids = [point.id for point in result[0]]
+                
+                if point_ids:
+                    self.client.delete(
+                        collection_name=coll,
+                        points_selector=point_ids
                     )
-                ]
-            ),
-            limit=10000  # Adjust based on expected file size
-        )
-        
-        point_ids = [point.id for point in result[0]]
-        
-        if point_ids:
-            self.client.delete(
-                collection_name=collection_name,
-                points_selector=point_ids
-            )
+            except Exception:
+                continue

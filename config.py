@@ -37,7 +37,6 @@ class Config:
         
         # Collection naming with prefix pattern
         self.qdrant_collection_prefix = os.getenv('QDRANT_COLLECTION_PREFIX', 'game')
-        self.qdrant_collection_general = f"{self.qdrant_collection_prefix}_general"
         self.qdrant_collection_npcs = f"{self.qdrant_collection_prefix}_npcs"
         self.qdrant_collection_rulebooks = f"{self.qdrant_collection_prefix}_rulebooks"
         self.qdrant_collection_adventurepaths = f"{self.qdrant_collection_prefix}_adventurepaths"
@@ -94,7 +93,6 @@ class Config:
   Qdrant: {self.qdrant_host}:{self.qdrant_port}
   Collection Prefix: {self.qdrant_collection_prefix}
   Collections:
-    - {self.qdrant_collection_general}
     - {self.qdrant_collection_npcs}
     - {self.qdrant_collection_rulebooks}
     - {self.qdrant_collection_adventurepaths}
