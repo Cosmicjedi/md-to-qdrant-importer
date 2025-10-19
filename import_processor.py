@@ -8,6 +8,7 @@ CHANGES:
 - Added tracking for when NPC extraction is skipped
 - Updated save_results() to report skipped NPC extractions
 - FIXED: Pass chunker to MarkdownProcessor constructor
+- FIXED: Added recursive and skip_existing parameters to process_directory()
 """
 
 import json
@@ -35,6 +36,7 @@ class ImportResult:
     error: Optional[str] = None
     processing_time: float = 0.0
     skipped_npc_extraction: bool = False
+    skipped_existing: bool = False
     
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -69,19 +71,49 @@ class ImportProcessor:
         if self.progress_callback:
             self.progress_callback(message)
     
+    def _file_already_imported(self, file_path: Path) -> bool:
+        """
+        Check if a file has already been imported to the database
+        
+        Args:
+            file_path: Path to check
+            
+        Returns:
+            True if file exists in database
+        """
+        try:
+            collection = self.qdrant.determine_collection(file_path)
+            # Query for points with this file path
+            result = self.qdrant.client.scroll(
+                collection_name=collection,
+                scroll_filter={
+                    "must": [
+                        {
+                            "key": "metadata.file_path",
+                            "match": {"value": str(file_path)}
+                        }
+                    ]
+                },
+                limit=1
+            )
+            return len(result[0]) > 0
+        except Exception:
+            # If collection doesn't exist or any error, assume not imported
+            return False
+    
     def process_file(
         self,
         file_path: Path,
-        extract_npcs: bool = True
+        extract_npcs: bool = True,
+        skip_if_exists: bool = False
     ) -> ImportResult:
         """
         Process a single markdown file
         
-        FIXED: Now skips NPC extraction for adventure paths
-        
         Args:
             file_path: Path to the markdown file
             extract_npcs: Whether to extract NPCs (ignored for adventure paths)
+            skip_if_exists: Skip if file already in database
             
         Returns:
             ImportResult with processing details
@@ -89,6 +121,16 @@ class ImportProcessor:
         start_time = time.time()
         
         try:
+            # Check if file already imported
+            if skip_if_exists and self._file_already_imported(file_path):
+                self._update_progress(f"Skipping {file_path.name} (already imported)")
+                return ImportResult(
+                    file_path=str(file_path),
+                    success=True,
+                    skipped_existing=True,
+                    processing_time=time.time() - start_time
+                )
+            
             self._update_progress(f"Processing {file_path.name}...")
             
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -158,6 +200,8 @@ class ImportProcessor:
         self,
         directory: Path,
         pattern: str = "*.md",
+        recursive: bool = False,
+        skip_existing: bool = False,
         extract_npcs: bool = True
     ) -> List[ImportResult]:
         """
@@ -165,27 +209,70 @@ class ImportProcessor:
         
         Args:
             directory: Directory to process
-            pattern: File pattern to match
+            pattern: File pattern to match (default: "*.md")
+            recursive: Whether to search subdirectories recursively
+            skip_existing: Skip files already in database
             extract_npcs: Whether to extract NPCs
             
         Returns:
             List of import results
         """
-        files = list(directory.glob(pattern))
+        # Collect files based on recursive flag
+        if recursive:
+            # Use rglob for recursive search
+            files = list(directory.rglob(pattern))
+        else:
+            # Use glob for non-recursive search
+            files = list(directory.glob(pattern))
         
         if not files:
-            self._update_progress(f"No files matching '{pattern}' found in {directory}")
+            self._update_progress(
+                f"No files matching '{pattern}' found in {directory}" +
+                (" (including subdirectories)" if recursive else "")
+            )
             return []
         
-        self._update_progress(f"Found {len(files)} files to process")
+        self._update_progress(
+            f"Found {len(files)} files to process" +
+            (" (including subdirectories)" if recursive else "")
+        )
         
         results = []
         for i, file_path in enumerate(files, 1):
             self._update_progress(f"[{i}/{len(files)}] Processing {file_path.name}")
-            result = self.process_file(file_path, extract_npcs)
+            result = self.process_file(
+                file_path,
+                extract_npcs=extract_npcs,
+                skip_if_exists=skip_existing
+            )
             results.append(result)
         
         return results
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        Get statistics from Qdrant collections
+        
+        Returns:
+            Dictionary with collection statistics
+        """
+        stats = {}
+        
+        for collection_name in [
+            f"{self.config.qdrant_collection_prefix}_npcs",
+            f"{self.config.qdrant_collection_prefix}_rulebooks",
+            f"{self.config.qdrant_collection_prefix}_adventurepaths"
+        ]:
+            try:
+                collection_info = self.qdrant.client.get_collection(collection_name)
+                stats[collection_name] = {
+                    "points_count": collection_info.points_count,
+                    "vectors_count": collection_info.vectors_count
+                }
+            except Exception as e:
+                stats[collection_name] = {"error": str(e)}
+        
+        return stats
     
     def save_results(
         self,
@@ -195,8 +282,6 @@ class ImportProcessor:
         """
         Save import results to JSON file
         
-        FIXED: Now includes count of files that skipped NPC extraction
-        
         Args:
             results: List of import results
             output_path: Path to save results JSON
@@ -205,6 +290,7 @@ class ImportProcessor:
             'total_files': len(results),
             'successful': sum(1 for r in results if r.success),
             'failed': sum(1 for r in results if not r.success),
+            'skipped_existing': sum(1 for r in results if r.skipped_existing),
             'total_chunks': sum(r.chunks_imported for r in results),
             'total_npcs': sum(r.npcs_extracted for r in results),
             'adventure_paths_skipped_npc': sum(1 for r in results if r.skipped_npc_extraction),
