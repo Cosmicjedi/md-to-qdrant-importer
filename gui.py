@@ -227,8 +227,8 @@ class ImporterGUI:
         # Update environment variable
         os.environ['QDRANT_COLLECTION_PREFIX'] = new_prefix
         
-        # Reload config
-        self._load_config()
+        # Reload config with force_reload to pick up new prefix
+        self._load_config(force_reload=True)
         
         self._log(f"Collection prefix updated to: {new_prefix}")
         self._update_collections_display()
@@ -251,12 +251,13 @@ class ImporterGUI:
             filetypes=[("Environment files", "*.env"), ("All files", "*.*")]
         )
         if file_path:
-            self._load_config(file_path)
+            self._load_config(file_path, force_reload=True)
     
-    def _load_config(self, env_file: Optional[str] = None):
+    def _load_config(self, env_file: Optional[str] = None, force_reload: bool = False):
         """Load configuration"""
         try:
-            self.config = get_config(env_file)
+            # FIXED: Force reload when needed to pick up new prefix
+            self.config = get_config(env_file, force_reload=force_reload)
             is_valid, errors = self.config.validate()
             
             if is_valid:
@@ -478,7 +479,7 @@ class ImporterGUI:
             "- Separate canonical NPC storage\n"
             "- Configurable collection prefixes\n"
             "- Progress tracking and logging\n\n"
-            "Version 1.1"
+            "Version 1.2"
         )
 
 
