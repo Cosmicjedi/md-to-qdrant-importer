@@ -76,6 +76,34 @@ class TextChunker:
         
         return chunks
     
+    def create_chunks(self, text: str, metadata: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """
+        Create chunks with metadata (compatible with import_processor)
+        
+        Args:
+            text: Text to chunk
+            metadata: Optional metadata to attach to each chunk
+            
+        Returns:
+            List of chunk dictionaries with 'text' and metadata
+        """
+        if metadata is None:
+            metadata = {}
+        
+        text_chunks = self.chunk_text(text)
+        
+        chunks = []
+        for i, chunk_text in enumerate(text_chunks):
+            chunk_dict = {
+                'text': chunk_text,
+                'chunk_index': i,
+                'total_chunks': len(text_chunks),
+                **metadata
+            }
+            chunks.append(chunk_dict)
+        
+        return chunks
+    
     def chunk_by_sections(self, text: str, headers: List[str]) -> Dict[str, List[str]]:
         """
         Chunk text by markdown sections
@@ -132,6 +160,57 @@ class MarkdownProcessor:
             chunker: TextChunker instance
         """
         self.chunker = chunker
+    
+    def parse_markdown(self, content: str) -> List[Dict[str, Any]]:
+        """
+        Parse markdown content into sections
+        
+        Args:
+            content: Markdown content
+            
+        Returns:
+            List of section dictionaries with headers and content
+        """
+        sections = []
+        
+        # Split by headers
+        header_pattern = r'^(#{1,6})\s+(.+)$'
+        lines = content.split('\n')
+        
+        current_section = {
+            'level': 0,
+            'title': 'Introduction',
+            'content': []
+        }
+        
+        for line in lines:
+            header_match = re.match(header_pattern, line)
+            
+            if header_match:
+                # Save previous section
+                if current_section['content']:
+                    current_section['content'] = '\n'.join(current_section['content']).strip()
+                    if current_section['content']:
+                        sections.append(current_section)
+                
+                # Start new section
+                level = len(header_match.group(1))
+                title = header_match.group(2).strip()
+                current_section = {
+                    'level': level,
+                    'title': title,
+                    'content': []
+                }
+            else:
+                current_section['content'].append(line)
+        
+        # Save last section
+        if current_section['content']:
+            current_section['content'] = '\n'.join(current_section['content']).strip()
+            if current_section['content']:
+                sections.append(current_section)
+        
+        return sections
     
     def extract_metadata(self, content: str, file_path: Path) -> Dict[str, Any]:
         """
