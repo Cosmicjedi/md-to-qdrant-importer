@@ -258,7 +258,6 @@ Write-Host "4. For help:" -ForegroundColor Yellow
 Write-Host "   python cli.py --help" -ForegroundColor White
 Write-Host ""
 Write-Host "Collections that will be created:" -ForegroundColor Cyan
-Write-Host "  - ${collection_prefix}_general       : General content" -ForegroundColor White
 Write-Host "  - ${collection_prefix}_npcs          : Extracted NPCs (canonical: true)" -ForegroundColor White
 Write-Host "  - ${collection_prefix}_rulebooks     : Rulebook content" -ForegroundColor White
 Write-Host "  - ${collection_prefix}_adventurepaths: Adventure content" -ForegroundColor White

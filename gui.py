@@ -9,6 +9,7 @@ from pathlib import Path
 from threading import Thread
 from typing import Optional
 import json
+import os
 
 from config import Config, get_config
 from import_processor import ImportProcessor, ImportResult
@@ -26,7 +27,7 @@ class ImporterGUI:
         """
         self.root = root
         self.root.title("MD to Qdrant Importer")
-        self.root.geometry("900x700")
+        self.root.geometry("900x750")
         
         # Configuration
         self.config: Optional[Config] = None
@@ -68,7 +69,7 @@ class ImporterGUI:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(4, weight=1)
+        main_frame.rowconfigure(5, weight=1)
         
         # Configuration status
         config_frame = ttk.LabelFrame(main_frame, text="Configuration", padding="5")
@@ -82,9 +83,27 @@ class ImporterGUI:
             row=0, column=1, sticky=tk.E
         )
         
+        # Collection prefix configuration
+        prefix_frame = ttk.LabelFrame(main_frame, text="Collection Prefix", padding="5")
+        prefix_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        prefix_frame.columnconfigure(1, weight=1)
+        
+        ttk.Label(prefix_frame, text="Prefix:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        self.prefix_var = tk.StringVar(value="game")
+        prefix_entry = ttk.Entry(prefix_frame, textvariable=self.prefix_var, width=30)
+        prefix_entry.grid(row=0, column=1, sticky=tk.W, padx=(0, 10))
+        
+        ttk.Button(prefix_frame, text="Update Collections", command=self._update_prefix).grid(
+            row=0, column=2, padx=5
+        )
+        
+        # Collections preview
+        self.collections_label = ttk.Label(prefix_frame, text="Collections: (not configured)", foreground="gray")
+        self.collections_label.grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(5, 0))
+        
         # Input directory selection
         input_frame = ttk.LabelFrame(main_frame, text="Input Directory", padding="5")
-        input_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        input_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         input_frame.columnconfigure(0, weight=1)
         
         self.input_dir_var = tk.StringVar()
@@ -97,7 +116,7 @@ class ImporterGUI:
         
         # Options
         options_frame = ttk.LabelFrame(main_frame, text="Options", padding="5")
-        options_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        options_frame.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         
         self.recursive_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
@@ -122,7 +141,7 @@ class ImporterGUI:
         
         # Action buttons
         button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=3, column=0, pady=(0, 10))
+        button_frame.grid(row=4, column=0, pady=(0, 10))
         
         self.import_button = ttk.Button(
             button_frame,
@@ -154,7 +173,7 @@ class ImporterGUI:
         
         # Progress and log
         log_frame = ttk.LabelFrame(main_frame, text="Progress", padding="5")
-        log_frame.grid(row=4, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        log_frame.grid(row=5, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(1, weight=1)
         
@@ -178,7 +197,41 @@ class ImporterGUI:
         
         # Status bar
         self.status_label = ttk.Label(main_frame, text="Ready", relief=tk.SUNKEN)
-        self.status_label.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=(5, 0))
+        self.status_label.grid(row=6, column=0, sticky=(tk.W, tk.E), pady=(5, 0))
+    
+    def _update_collections_display(self):
+        """Update the collections preview label"""
+        if self.config:
+            prefix = self.prefix_var.get()
+            collections_text = (
+                f"Collections: {prefix}_npcs, {prefix}_rulebooks, {prefix}_adventurepaths"
+            )
+            self.collections_label.config(text=collections_text, foreground="black")
+    
+    def _update_prefix(self):
+        """Update the collection prefix"""
+        new_prefix = self.prefix_var.get().strip()
+        
+        if not new_prefix:
+            messagebox.showwarning("Warning", "Prefix cannot be empty")
+            return
+        
+        # Validate prefix (basic check for valid collection name)
+        if not new_prefix.replace('_', '').replace('-', '').isalnum():
+            messagebox.showwarning(
+                "Warning",
+                "Prefix can only contain letters, numbers, underscores, and hyphens"
+            )
+            return
+        
+        # Update environment variable
+        os.environ['QDRANT_COLLECTION_PREFIX'] = new_prefix
+        
+        # Reload config
+        self._load_config()
+        
+        self._log(f"Collection prefix updated to: {new_prefix}")
+        self._update_collections_display()
     
     def _log(self, message: str):
         """Add message to log"""
@@ -210,6 +263,10 @@ class ImporterGUI:
                 self.config_status_label.config(text="Loaded ✓", foreground="green")
                 self._log("Configuration loaded successfully")
                 self._log(str(self.config))
+                
+                # Update prefix from config
+                self.prefix_var.set(self.config.qdrant_collection_prefix)
+                self._update_collections_display()
                 
                 # Initialize processor
                 self.processor = ImportProcessor(
@@ -264,10 +321,19 @@ class ImporterGUI:
             messagebox.showerror("Error", f"Directory does not exist: {input_dir}")
             return
         
+        # Show current collections being used
+        prefix = self.prefix_var.get()
+        collections_info = (
+            f"Collections that will be used:\n"
+            f"  - {prefix}_npcs (for NPCs)\n"
+            f"  - {prefix}_rulebooks (for rulebooks)\n"
+            f"  - {prefix}_adventurepaths (for adventures)"
+        )
+        
         # Confirm
         if not messagebox.askyesno(
             "Confirm Import",
-            f"Import markdown files from:\n{input_dir}\n\nContinue?"
+            f"Import markdown files from:\n{input_dir}\n\n{collections_info}\n\nContinue?"
         ):
             return
         
@@ -286,6 +352,7 @@ class ImporterGUI:
         try:
             self._log("=" * 60)
             self._log(f"Starting import from: {input_path}")
+            self._log(f"Collection prefix: {self.config.qdrant_collection_prefix}")
             self._log("=" * 60)
             
             results = self.processor.process_directory(
@@ -303,6 +370,12 @@ class ImporterGUI:
             total_chunks = sum(r.chunks_imported for r in results)
             total_npcs = sum(r.npcs_extracted for r in results)
             
+            # Collection distribution
+            collection_counts = {}
+            for r in results:
+                if r.success and r.collection_used:
+                    collection_counts[r.collection_used] = collection_counts.get(r.collection_used, 0) + 1
+            
             self._log("=" * 60)
             self._log("Import Complete!")
             self._log(f"Total files: {len(results)}")
@@ -310,6 +383,9 @@ class ImporterGUI:
             self._log(f"Failed: {failed}")
             self._log(f"Total chunks imported: {total_chunks}")
             self._log(f"Total NPCs extracted: {total_npcs}")
+            self._log("\nCollection Distribution:")
+            for coll, count in collection_counts.items():
+                self._log(f"  {coll}: {count} files")
             self._log("=" * 60)
             
             self.root.after(0, lambda: messagebox.showinfo(
@@ -400,8 +476,9 @@ class ImporterGUI:
             "- Semantic chunking and embedding\n"
             "- Azure AI-powered NPC extraction\n"
             "- Separate canonical NPC storage\n"
+            "- Configurable collection prefixes\n"
             "- Progress tracking and logging\n\n"
-            "Version 1.0"
+            "Version 1.1"
         )
 
 

@@ -206,7 +206,6 @@ echo 4. For help:
 echo    python cli.py --help
 echo.
 echo Collections that will be created:
-echo   - !COLLECTION_PREFIX!_general       : General content
 echo   - !COLLECTION_PREFIX!_npcs          : Extracted NPCs (canonical: true)
 echo   - !COLLECTION_PREFIX!_rulebooks     : Rulebook content
 echo   - !COLLECTION_PREFIX!_adventurepaths: Adventure content

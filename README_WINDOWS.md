@@ -286,7 +286,6 @@ After successful setup:
 
 5. **Start Using Your Data**
    - Use the collections created:
-     - `game_general` - General content
      - `game_npcs` - NPC stat blocks
      - `game_rulebooks` - Rules content
      - `game_adventurepaths` - Adventures
