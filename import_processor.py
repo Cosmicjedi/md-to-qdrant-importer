@@ -7,6 +7,7 @@ CHANGES:
 - Modified process_file() to skip NPC extraction for adventure paths
 - Added tracking for when NPC extraction is skipped
 - Updated save_results() to report skipped NPC extractions
+- FIXED: Pass chunker to MarkdownProcessor constructor
 """
 
 import json
@@ -55,7 +56,8 @@ class ImportProcessor:
             chunk_size=config.chunk_size,
             overlap=config.chunk_overlap
         )
-        self.markdown_processor = MarkdownProcessor()
+        # FIXED: Pass chunker to MarkdownProcessor
+        self.markdown_processor = MarkdownProcessor(self.chunker)
         self.embedder = EmbeddingGenerator(config)
         
         self.npc_extractor = None
