@@ -1,0 +1,64 @@
+md-to-qdrant-importer/
+│
+├── 📋 Configuration & Setup
+│   ├── .env.template          # Configuration template (copy to .env)
+│   ├── .gitignore             # Git ignore rules
+│   ├── .gitattributes         # Git file attributes
+│   ├── requirements.txt       # Python dependencies
+│   ├── setup.sh               # Automated setup script ⚡
+│   └── LICENSE                # MIT License
+│
+├── 🐍 Core Application
+│   ├── config.py              # Configuration management (Config class)
+│   ├── text_processor.py      # Markdown chunking (TextChunker, MarkdownProcessor)
+│   ├── npc_extractor.py       # Azure AI NPC extraction (NPCExtractor, NPCData)
+│   ├── qdrant_handler.py      # Vector DB operations (QdrantHandler)
+│   └── import_processor.py    # Main coordinator (ImportProcessor)
+│
+├── 🖥️ User Interfaces
+│   ├── gui.py                 # Tkinter GUI application
+│   └── cli.py                 # Command-line interface ⚡
+│
+├── 🔧 Tools
+│   └── validate.py            # System validation tool ⚡
+│
+├── 📚 Documentation
+│   ├── README.md              # Complete user guide (7.5KB)
+│   ├── QUICKSTART.md          # 5-minute getting started (5KB)
+│   ├── ARCHITECTURE.md        # Technical architecture (15.8KB)
+│   ├── DELIVERY.md            # Project summary (11KB)
+│   ├── COLLECTION_NAMING.md   # Collection prefix guide (8KB)
+│   └── PROJECT_STATUS.txt     # Status summary
+│
+├── 📁 Examples
+│   ├── ancient_red_dragon.md  # Complex NPC example
+│   ├── goblin.md              # Simple NPC example
+│   └── waterdeep.md           # Non-NPC content example
+│
+├── 📁 Directories (created on setup)
+│   ├── input_md_files/        # Place your MD files here
+│   ├── output_logs/           # Import logs and results
+│   └── venv/                  # Python virtual environment (after setup)
+│
+└── 📄 Project Files
+    ├── FILE_TREE.txt          # This file
+    └── PROJECT_STATUS.txt     # Project status
+
+Legend:
+  ⚡ = Executable script
+  📋 = Configuration
+  🐍 = Python module
+  🖥️ = User interface
+  🔧 = Tool/utility
+  📚 = Documentation
+  📁 = Directory
+
+Total Files: 25
+Total Directories: 5
+Lines of Code: ~3,300
+
+Key Entry Points:
+  GUI:  python gui.py
+  CLI:  python cli.py ./input_md_files
+  Test: python validate.py
+  Help: python cli.py --help
